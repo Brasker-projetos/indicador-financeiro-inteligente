@@ -1,0 +1,1 @@
+# indicador-financeiro-inteligente
