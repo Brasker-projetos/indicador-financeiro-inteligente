@@ -1851,23 +1851,13 @@ function clearSensitiveSession() {
   if(previewArea) previewArea.innerHTML = '';
   const pdfRender = document.getElementById('pdf-render');
   if(pdfRender) pdfRender.innerHTML = '';
-  // Se o Firebase já carregou antes do DOMContentLoaded, usa os dados dele
+  // Recarrega responsáveis do Firebase
   if (Array.isArray(window._fbResponsaveisIniciais) && window._fbResponsaveisIniciais.length) {
     responsaveisCache = [...new Set(window._fbResponsaveisIniciais.map(normalizeNome).filter(Boolean))];
   } else {
     responsaveisCache = [...new Set(RESPONSAVEIS_PADRAO.map(normalizeNome).filter(Boolean))];
   }
   renderResponsaveis();
-
-  // Quando o Firebase terminar de carregar (pode ser após o DOMContentLoaded)
-  document.addEventListener('firebase-ready', () => {
-    if (Array.isArray(window._fbResponsaveisIniciais) && window._fbResponsaveisIniciais.length) {
-      responsaveisCache = null; // força reload com dados do Firebase
-      const currentVal = document.getElementById('responsavel')?.value || '';
-      renderResponsaveis(currentVal);
-      toast('✅ Responsáveis carregados do Firebase.', 'success');
-    }
-  });
   calcDRE();
   calcILC();
   summarizeImportedState();
@@ -3125,8 +3115,24 @@ document.addEventListener('DOMContentLoaded', () => {
   const m = String(now.getMonth()+1).padStart(2,'0');
   document.getElementById('competencia').value = `${y}-${m}`;
   syncCompetenciaPartsFromValue(`${y}-${m}`);
-  responsaveisCache = [...new Set(RESPONSAVEIS_PADRAO.map(normalizeNome).filter(Boolean))];
-  renderResponsaveis();
+  // Aguarda Firebase carregar antes de renderizar
+  // Se Firebase já veio antes do DOMContentLoaded, usa direto
+  if (Array.isArray(window._fbResponsaveisIniciais) && window._fbResponsaveisIniciais.length) {
+    responsaveisCache = [...new Set(window._fbResponsaveisIniciais.map(normalizeNome).filter(Boolean))];
+    renderResponsaveis();
+  } else {
+    // Usa padrão enquanto aguarda Firebase
+    responsaveisCache = [...new Set(RESPONSAVEIS_PADRAO.map(normalizeNome).filter(Boolean))];
+    renderResponsaveis();
+    // Quando Firebase chegar, substitui
+    document.addEventListener('firebase-ready', () => {
+      if (Array.isArray(window._fbResponsaveisIniciais) && window._fbResponsaveisIniciais.length) {
+        responsaveisCache = [...new Set(window._fbResponsaveisIniciais.map(normalizeNome).filter(Boolean))];
+        const currentVal = document.getElementById('responsavel')?.value || '';
+        renderResponsaveis(currentVal);
+      }
+    });
+  }
 
   document.querySelectorAll('input, select').forEach(el => {
     el.setAttribute('autocomplete', 'off');
