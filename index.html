@@ -8,6 +8,14 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- PDF.js para extrair texto de PDFs externos (sem metadados BRSK) -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script>
+  if (window['pdfjsLib']) {
+    window['pdfjsLib'].GlobalWorkerOptions.workerSrc =
+      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  }
+</script>
 
 <!-- Firebase Realtime Database SDK -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
@@ -976,7 +984,7 @@ body {
           <input type="file" id="pdf-anterior" accept="application/pdf" onchange="handlePreviousPdfUpload(event)" />
           <div class="icon">📎</div>
           <p>Anexar PDF do indicador da competência anterior</p>
-          <small>Ex.: em fevereiro, anexe o PDF de janeiro; em março, anexe o PDF de fevereiro, e assim sucessivamente.</small>
+          <small>Ex.: em fevereiro, anexe o PDF de janeiro; em março, anexe o PDF de fevereiro, e assim sucessivamente. Aceita tanto PDFs gerados por esta plataforma quanto relatórios contábil-financeiros externos (o nome do arquivo não interfere — o que importa é o conteúdo).</small>
         </div>
 
         <div id="previous-pdf-summary" style="margin-top:16px">
@@ -1787,27 +1795,463 @@ function parseEmbeddedPdfPayload(pdfText) {
   };
 }
 
+// ──────────────────────────────────────────────────────────────
+// Parser de PDFs EXTERNOS (sem metadados BRSK embutidos)
+// Usado como fallback quando o PDF não foi gerado por esta plataforma.
+// O nome do arquivo NÃO interfere — todo o parse é feito sobre o conteúdo.
+// ──────────────────────────────────────────────────────────────
+
+async function extractVisibleTextFromPdf(buffer) {
+  if(!window.pdfjsLib) {
+    throw new Error('Biblioteca de leitura de PDF não disponível. Verifique a conexão de internet e recarregue a página.');
+  }
+  const loadingTask = window.pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
+  const pdf = await loadingTask.promise;
+  let fullText = '';
+  for(let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    // Concatena os itens preservando quebras de linha aproximadas pelo eixo Y
+    let lastY = null;
+    let pageLine = '';
+    const lines = [];
+    for(const item of content.items) {
+      const tx = item.transform || [];
+      const y = tx[5];
+      if(lastY !== null && Math.abs(y - lastY) > 2) {
+        if(pageLine.trim()) lines.push(pageLine.trim());
+        pageLine = '';
+      }
+      pageLine += (pageLine ? ' ' : '') + (item.str || '');
+      lastY = y;
+    }
+    if(pageLine.trim()) lines.push(pageLine.trim());
+    fullText += lines.join('\n') + '\n';
+  }
+  return fullText;
+}
+
+function parseBRNumber(str) {
+  if(str === null || str === undefined) return 0;
+  let s = String(str).replace(/R\$/gi, '').replace(/\s/g, '').replace(/%/g, '');
+  if(!s) return 0;
+  if(s.includes(',')) {
+    s = s.replace(/\./g, '').replace(',', '.');
+  }
+  const v = parseFloat(s);
+  return isNaN(v) ? 0 : v;
+}
+
+const MES_PT_TO_NUM = {
+  'janeiro':'01','fevereiro':'02','marco':'03','março':'03','abril':'04','maio':'05',
+  'junho':'06','julho':'07','agosto':'08','setembro':'09','outubro':'10','novembro':'11','dezembro':'12',
+  'jan':'01','fev':'02','mar':'03','abr':'04','mai':'05','jun':'06',
+  'jul':'07','ago':'08','set':'09','out':'10','nov':'11','dez':'12'
+};
+
+function normalizeMonthKey(s) {
+  return String(s || '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim();
+}
+
+function detectCompetenciaFromText(text) {
+  const lowerOriginal = text.toLowerCase();
+  const lower = normalizeMonthKey(text);
+  // Padrão 1: "competencia ... marco/2026"
+  const m1 = lower.match(/compet[eê]ncia[^a-z0-9]*([a-z]+)[\s\/\-de]+(\d{2,4})/);
+  if(m1) {
+    const mesKey = m1[1].slice(0,9);
+    const mes = MES_PT_TO_NUM[mesKey] || MES_PT_TO_NUM[mesKey.slice(0,3)];
+    let ano = m1[2];
+    if(ano.length === 2) ano = '20' + ano;
+    if(mes && parseInt(ano) >= 2000 && parseInt(ano) <= 2099) return ano + '-' + mes;
+  }
+  // Padrão 2: "competencia ... 03/2026"
+  const m2 = lowerOriginal.match(/compet[êe]ncia[^0-9]*(0[1-9]|1[0-2])[\s\/\-\.](\d{4})/);
+  if(m2) return m2[2] + '-' + m2[1];
+  // Padrão 3: qualquer "março/2026" no texto
+  for(const [nome, num] of Object.entries(MES_PT_TO_NUM)) {
+    if(nome.length < 4) continue;
+    const re = new RegExp(nome + '[\\s\\/\\-]+(\\d{4})', 'i');
+    const m = lower.match(re);
+    if(m) {
+      const ano = m[1];
+      if(parseInt(ano) >= 2000) return ano + '-' + num;
+    }
+  }
+  return '';
+}
+
+function detectCnpjFromText(text) {
+  const m = text.match(/(\d{2}[.\s]?\d{3}[.\s]?\d{3}[\/\s]?\d{4}[-\s]?\d{2})/);
+  return m ? m[1] : '';
+}
+
+function detectRazaoSocialFromText(text) {
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+  for(let i = 0; i < lines.length; i++) {
+    const ln = lines[i];
+    const upper = ln.replace(/[^A-ZÁÉÍÓÚÂÊÔÃÕÇ ]/gi, '').trim();
+    if(!upper || upper.length < 5) continue;
+    const lower = ln.toLowerCase();
+    if(lower.includes('relat') || lower.includes('cnpj') || lower.includes('compet') ||
+       lower.includes('receita') || lower.includes('resultado') || lower.includes('dedu') ||
+       lower.includes('custo') || lower.includes('despesa') || lower.includes('emitido') ||
+       lower.includes('destaque') || lower.includes('liquidez') || lower.includes('lucro') ||
+       lower.includes('prejui') || lower.includes('resumo') || lower.includes('brasker') ||
+       lower.includes('financeiro')) continue;
+    if(/^[A-ZÁÉÍÓÚÂÊÔÃÕÇ&\s\-\.]{5,}$/.test(ln)) {
+      return ln;
+    }
+  }
+  return '';
+}
+
+function detectDREValuesFromText(text) {
+  const result = {
+    receitaBruta: 0, deducoes: 0, receitaLiquida: 0,
+    custos: 0, resultado: 0,
+    receitasFinanceiras: 0, despFinanceiras: 0
+  };
+  const lines = text.split('\n');
+  function valueInLine(line) {
+    const matches = line.match(/-?\d{1,3}(?:\.\d{3})*,\d{2}/g);
+    if(!matches || !matches.length) return 0;
+    return parseBRNumber(matches[matches.length - 1]);
+  }
+  for(const raw of lines) {
+    const line = raw.trim();
+    if(!line) continue;
+    const lower = normalizeMonthKey(line);
+    if(/receita\s+bruta/.test(lower) && !/dedu/.test(lower) && !result.receitaBruta) {
+      const v = valueInLine(line); if(v) result.receitaBruta = Math.abs(v);
+    }
+    else if(/dedu[cç]/.test(lower) && /receita|bruta/.test(lower) && !result.deducoes) {
+      const v = valueInLine(line); if(v) result.deducoes = Math.abs(v);
+    }
+    else if(/receita\s+l[ií]quida/.test(lower) && !result.receitaLiquida) {
+      const v = valueInLine(line); if(v) result.receitaLiquida = Math.abs(v);
+    }
+    else if((/custo/.test(lower) || /despesa/.test(lower)) && !/financ/.test(lower) && !result.custos) {
+      const v = valueInLine(line); if(v) result.custos = Math.abs(v);
+    }
+    else if(/receita/.test(lower) && /financ/.test(lower) && !result.receitasFinanceiras) {
+      const v = valueInLine(line); if(v) result.receitasFinanceiras = Math.abs(v);
+    }
+    else if(/despesa/.test(lower) && /financ/.test(lower) && !result.despFinanceiras) {
+      const v = valueInLine(line); if(v) result.despFinanceiras = Math.abs(v);
+    }
+    else if(/resultado/.test(lower) && /per[ií]odo|exerc[ií]cio|l[ií]quido/.test(lower) && !result.resultado) {
+      const v = valueInLine(line); if(v) result.resultado = v;
+    }
+  }
+  if(!result.receitaLiquida && result.receitaBruta) {
+    result.receitaLiquida = result.receitaBruta - result.deducoes;
+  }
+  if(!result.resultado && result.receitaLiquida) {
+    result.resultado = result.receitaLiquida - result.custos + result.receitasFinanceiras - result.despFinanceiras;
+  }
+  return result;
+}
+
+function detectILCFromText(text) {
+  const lower = normalizeMonthKey(text);
+  const patterns = [
+    /[ií]ndice\s+de\s+liquidez\s+corrente[^0-9-]*(-?\d+[.,]\d+)/i,
+    /liquidez\s+corrente[^0-9-]*(-?\d+[.,]\d+)/i,
+    /ilc[^0-9-]*(-?\d+[.,]\d+)/i
+  ];
+  for(const pat of patterns) {
+    const m = lower.match(pat);
+    if(m) {
+      const v = parseBRNumber(m[1]);
+      if(!isNaN(v) && v > 0) return v;
+    }
+  }
+  return 0;
+}
+
+function detectHistoricalSeriesFromText(text) {
+  const series = {};
+  const lines = text.split('\n').map(l => l.trim()).filter(Boolean);
+
+  function parseMonthLabels(line) {
+    const re = /\b([a-zç]{3,9})[\.\s\-\/]+(\d{2,4})\b/gi;
+    const out = [];
+    let m;
+    while((m = re.exec(line)) !== null) {
+      const key = normalizeMonthKey(m[1]);
+      const mes = MES_PT_TO_NUM[key] || MES_PT_TO_NUM[key.slice(0,3)];
+      if(!mes) continue;
+      let ano = m[2];
+      if(ano.length === 2) ano = '20' + ano;
+      if(parseInt(ano) < 2000 || parseInt(ano) > 2099) continue;
+      out.push(ano + '-' + mes);
+    }
+    return out;
+  }
+
+  function parseValues(line) {
+    const matches = line.match(/-?\d{1,3}(?:\.\d{3})*,\d{2}|\b\d+,\d+\b/g);
+    return matches ? matches.map(parseBRNumber) : [];
+  }
+
+  // Reconhece tipo de bloco a partir de um título-rótulo
+  // (rígido: linha curta, sem dígitos, sem pontuação narrativa).
+  function classifyTitle(ln) {
+    const original = String(ln || '').trim();
+    if(!original || original.length > 50) return null; // títulos são curtos
+    if(/\d/.test(original)) return null; // títulos do gráfico não têm dígitos
+    // descarta linhas com frases narrativas
+    if(/[\.,;:!?]/.test(original.replace(/\/$/, ''))) return null;
+    const norm = normalizeMonthKey(original);
+    if(/^lucro\s*\/?\s*prejui[zs]o$/.test(norm)) return 'resultado';
+    if(/^receita\s+l[ií]?quida$/.test(norm)) return 'receitaLiquida';
+    if(/^custos?\s+e?\s*despesas?$/.test(norm)) return 'custos';
+    if(/^[ií]ndice\s+de\s+liquidez(\s+corrente|\s+geral)?$/.test(norm)) return 'ilc';
+    if(/^liquidez\s+corrente$/.test(norm)) return 'ilc';
+    return null;
+  }
+
+  // 1) Coletar índices das linhas-rótulo de meses (cada uma marca o fim de um mini-gráfico)
+  const labelLineIdxs = [];
+  for(let i = 0; i < lines.length; i++) {
+    const labels = parseMonthLabels(lines[i]);
+    if(labels.length >= 2) labelLineIdxs.push(i);
+  }
+
+  // 2) Coletar índices dos títulos identificáveis no documento (na ordem em que aparecem)
+  const titleSlots = [];
+  for(let i = 0; i < lines.length; i++) {
+    const t = classifyTitle(lines[i]);
+    if(t) titleSlots.push({ idx: i, type: t });
+  }
+
+  // 3) Para cada linha-rótulo, coletar valores.
+  //    Prioriza valores ACIMA (cada linha um valor) — formato comum dos relatórios
+  //    Brasker. Se acima não houver `count` valores únicos sequenciais, tenta a linha
+  //    imediatamente abaixo (que pode trazer todos numa só linha).
+  function valuesForLabelLine(idx, count) {
+    // Caso 1: N valores únicos em linhas consecutivas ACIMA
+    const above = [];
+    for(let k = idx - 1; k >= Math.max(0, idx - count - 3) && above.length < count; k--) {
+      const vals = parseValues(lines[k]);
+      if(vals.length === 1) above.unshift(vals[0]);
+      else if(vals.length === 0) {
+        if(above.length > 0) break;
+      } else {
+        // múltiplos valores numa linha — interrompe a varredura
+        break;
+      }
+    }
+    if(above.length === count) return above;
+
+    // Caso 2: linha imediatamente abaixo tem `count` valores numéricos (ex.: ILC em %)
+    if(idx + 1 < lines.length) {
+      const v = parseValues(lines[idx + 1]);
+      if(v.length === count) return v;
+    }
+
+    // Caso 3: uma linha logo acima já tem todos os `count` valores
+    for(let k = idx - 1; k >= Math.max(0, idx - 4); k--) {
+      const vals = parseValues(lines[k]);
+      if(vals.length === count) return vals;
+      if(vals.length) break;
+    }
+
+    return null;
+  }
+
+  // 4) Para cada label-line, encontrar PRIMEIRO o intervalo de valores correspondente,
+  //    depois escolher o título mais próximo do INÍCIO desse intervalo (i.e., o título
+  //    que aparece imediatamente antes do bloco de valores, como é comum em relatórios
+  //    contábeis: "Título → Valor1 Valor2 ... ValorN → dez/25 jan/26 ...").
+  //    Cada título só pode ser usado uma vez. Em caso de empate ou nenhum título não-usado
+  //    disponível, o gráfico é descartado para evitar série incorreta.
+  function valueBlockStart(idx, count) {
+    // Recupera o índice inicial do bloco de valores acima da label-line.
+    // Se valores vêm em N linhas únicas, retorna idx do primeiro valor.
+    // Se valores vêm em UMA linha, retorna idx dessa linha.
+    let last = -1;
+    let collected = 0;
+    for(let k = idx - 1; k >= Math.max(0, idx - count - 3) && collected < count; k--) {
+      const vals = parseValues(lines[k]);
+      if(vals.length === 1) { last = k; collected++; }
+      else if(vals.length === count) { return k; }
+      else if(vals.length === 0) {
+        if(collected > 0) break;
+      } else { break; }
+    }
+    if(collected === count) return last;
+    // Sem bloco acima — usa idx da label-line (fallback)
+    return idx;
+  }
+
+  const used = new Set();
+  function pickTitleFor(labelIdx, valBlockStartIdx) {
+    let best = null;
+    let bestDist = Infinity;
+    for(const slot of titleSlots) {
+      if(used.has(slot.idx)) continue;
+      // Distância ao INÍCIO do bloco de valores (não à label-line).
+      // Títulos que ficam ANTES do bloco têm preferência: penaliza distância negativa em 0,
+      // distância positiva (título depois do bloco) em +2.
+      const raw = slot.idx - valBlockStartIdx;
+      const d = raw <= 0 ? Math.abs(raw) : raw + 2;
+      if(d < bestDist) { best = slot; bestDist = d; }
+    }
+    if(best) used.add(best.idx);
+    return best ? best.type : null;
+  }
+
+  for(const labelIdx of labelLineIdxs) {
+    const labels = parseMonthLabels(lines[labelIdx]);
+    if(labels.length < 2) continue;
+    const vals = valuesForLabelLine(labelIdx, labels.length);
+    if(!vals) continue;
+    const blkStart = valueBlockStart(labelIdx, labels.length);
+    const ctx = pickTitleFor(labelIdx, blkStart);
+    if(!ctx) continue;
+    labels.forEach((comp, idx) => {
+      if(!series[comp]) series[comp] = {};
+      // Em alguns gráficos, ILC vem em %: 40,48 representa o valor real do índice.
+      // Mantemos como veio.
+      series[comp][ctx] = vals[idx];
+    });
+  }
+
+  return series;
+}
+
+function buildSeriesFromExternalPdf(currentComp, dre, ilc, historical, company) {
+  const map = new Map();
+  for(const [comp, vals] of Object.entries(historical || {})) {
+    if(!comp) continue;
+    map.set(comp, {
+      competencia: comp,
+      razaoSocial: company.razaoSocial || '',
+      cnpj: company.cnpj || '',
+      responsavel: company.responsavel || '',
+      receitaBruta: 0,
+      deducoes: 0,
+      receitaLiquida: vals.receitaLiquida || 0,
+      custos: vals.custos || 0,
+      receitasFinanceiras: 0,
+      despFinanceiras: 0,
+      resultado: vals.resultado || 0,
+      ativoCirculante: 0,
+      passivoCirculante: 0,
+      ativoTotal: 0,
+      patrimonio: 0,
+      ilc: vals.ilc || 0
+    });
+  }
+  if(currentComp) {
+    const existing = map.get(currentComp) || {};
+    map.set(currentComp, {
+      competencia: currentComp,
+      razaoSocial: company.razaoSocial || '',
+      cnpj: company.cnpj || '',
+      responsavel: company.responsavel || '',
+      receitaBruta: dre.receitaBruta || existing.receitaBruta || 0,
+      deducoes: dre.deducoes || existing.deducoes || 0,
+      receitaLiquida: dre.receitaLiquida || existing.receitaLiquida || 0,
+      custos: dre.custos || existing.custos || 0,
+      receitasFinanceiras: dre.receitasFinanceiras || existing.receitasFinanceiras || 0,
+      despFinanceiras: dre.despFinanceiras || existing.despFinanceiras || 0,
+      resultado: dre.resultado || existing.resultado || 0,
+      ativoCirculante: existing.ativoCirculante || 0,
+      passivoCirculante: existing.passivoCirculante || 0,
+      ativoTotal: 0,
+      patrimonio: 0,
+      ilc: ilc || existing.ilc || 0
+    });
+  }
+  return dedupeSeries(Array.from(map.values()));
+}
+
+function parseExternalPdfPayload(pdfText) {
+  const razaoSocial = detectRazaoSocialFromText(pdfText);
+  const cnpjRaw = detectCnpjFromText(pdfText);
+  const competencia = detectCompetenciaFromText(pdfText);
+  const dre = detectDREValuesFromText(pdfText);
+  const ilc = detectILCFromText(pdfText);
+
+  // OBS: Não extraímos séries históricas dos mini-gráficos do PDF externo
+  // porque a ordem do texto extraído nem sempre preserva a ordem visual,
+  // o que pode misturar valores entre os tipos de indicador. O usuário pode
+  // complementar os meses anteriores manualmente, se necessário (botão
+  // "Adicionar Mês Anterior Manualmente").
+  const historical = {};
+
+  if(!competencia) {
+    throw new Error('Não foi possível identificar a competência (mês/ano) no PDF anexado. Verifique se o relatório contém uma indicação clara da competência (ex.: "COMPETÊNCIA: MARÇO/2026").');
+  }
+  if(!dre.receitaBruta && !dre.receitaLiquida && !dre.resultado) {
+    throw new Error('Não foi possível identificar os valores do DRE (Receita Bruta, Receita Líquida ou Resultado) no PDF anexado. Verifique se o relatório segue o layout contábil padrão.');
+  }
+
+  const company = {
+    razaoSocial: safeUpper(razaoSocial),
+    cnpj: cnpjRaw || '',
+    responsavel: ''
+  };
+
+  const series = buildSeriesFromExternalPdf(competencia, dre, ilc, historical, company);
+
+  return {
+    version: 1,
+    company,
+    series: rolling12Series(series),
+    latestCompetencia: competencia,
+    _externalFallback: true
+  };
+}
+
 async function handlePreviousPdfUpload(event) {
   const file = event.target.files && event.target.files[0];
   if(!file) return;
+  // O nome do arquivo NÃO interfere no processamento — apenas é usado como rótulo de exibição.
   try {
     // Clear previous PDF import to avoid mixing data
     importedPdfState = null;
 
     const buffer = await file.arrayBuffer();
-    const pdfText = await extractMetadataTextFromPdf(buffer);
-    const payload = parseEmbeddedPdfPayload(pdfText);
+    let payload = null;
+    let usedFallback = false;
+
+    // 1) Tentativa primária: PDF gerado por esta plataforma (com metadados BRSK embutidos)
+    try {
+      const pdfText = await extractMetadataTextFromPdf(buffer);
+      payload = parseEmbeddedPdfPayload(pdfText);
+    } catch (innerErr) {
+      // 2) Fallback: PDF externo (qualquer relatório contábil-financeiro com texto extraível)
+      console.warn('[Upload PDF] Metadados BRSK não encontrados, tentando parser de texto:', innerErr.message);
+      try {
+        const visibleText = await extractVisibleTextFromPdf(buffer);
+        payload = parseExternalPdfPayload(visibleText);
+        usedFallback = true;
+      } catch (fallbackErr) {
+        console.error('[Upload PDF] Fallback falhou:', fallbackErr);
+        throw fallbackErr;
+      }
+    }
+
     validateImportedAgainstCurrent(payload);
     applyImportedPrefill(payload);
     importedPdfState = {
       fileName: file.name,
       company: payload.company,
       series: payload.series,
-      latestCompetencia: payload.latestCompetencia
+      latestCompetencia: payload.latestCompetencia,
+      external: !!usedFallback
     };
     summarizeImportedState();
     renderHistoryTable();
-    toast('PDF anterior carregado com sucesso. A evolução mensal foi incorporada somente à sessão atual.', 'success');
+    if(usedFallback) {
+      toast('PDF externo carregado com sucesso. Os dados foram extraídos do conteúdo do relatório (o nome do arquivo não interfere).', 'success');
+    } else {
+      toast('PDF anterior carregado com sucesso. A evolução mensal foi incorporada somente à sessão atual.', 'success');
+    }
   } catch (error) {
     console.error(error);
     importedPdfState = null;
