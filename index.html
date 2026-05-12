@@ -12,8 +12,21 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
 <script>
   if (window['pdfjsLib']) {
-    window['pdfjsLib'].GlobalWorkerOptions.workerSrc =
-      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    // Configura o worker. Quando o arquivo roda via file:// (clique duplo no HTML),
+    // o worker externo pode ser bloqueado pelo navegador. Por isso desabilitamos o
+    // worker e deixamos o pdf.js processar no thread principal (mais lento, mas
+    // compatível com file://). Quando hospedado em http(s), o worker continua funcionando.
+    try {
+      window['pdfjsLib'].GlobalWorkerOptions.workerSrc =
+        'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+    } catch(_) {}
+    if (location.protocol === 'file:') {
+      try {
+        // Carrega o worker como módulo "fake" no mesmo escopo (modo single-thread)
+        window['pdfjsLib'].GlobalWorkerOptions.workerSrc = '';
+        window.__PDFJS_DISABLE_WORKER__ = true;
+      } catch(_) {}
+    }
   }
 </script>
 
@@ -980,8 +993,8 @@ body {
           <p>Os dados financeiros desta competência ficam apenas em memória durante a sessão. Para manter a evolução mensal, anexe abaixo somente o PDF da competência imediatamente anterior. A série passa a operar em <strong>janela móvel dos últimos 12 meses</strong>, atravessando a virada do ano sem reiniciar.</p>
         </div>
 
-        <div class="upload-zone" onclick="document.getElementById('pdf-anterior').click()">
-          <input type="file" id="pdf-anterior" accept="application/pdf" onchange="handlePreviousPdfUpload(event)" />
+        <div class="upload-zone" id="pdf-upload-zone">
+          <input type="file" id="pdf-anterior" accept="application/pdf" />
           <div class="icon">📎</div>
           <p>Anexar PDF do indicador da competência anterior</p>
           <small>Ex.: em fevereiro, anexe o PDF de janeiro; em março, anexe o PDF de fevereiro, e assim sucessivamente. Aceita tanto PDFs gerados por esta plataforma quanto relatórios contábil-financeiros externos (o nome do arquivo não interfere — o que importa é o conteúdo).</small>
@@ -1805,7 +1818,13 @@ async function extractVisibleTextFromPdf(buffer) {
   if(!window.pdfjsLib) {
     throw new Error('Biblioteca de leitura de PDF não disponível. Verifique a conexão de internet e recarregue a página.');
   }
-  const loadingTask = window.pdfjsLib.getDocument({ data: new Uint8Array(buffer) });
+  // Em file:// o worker externo costuma ser bloqueado pelo navegador.
+  // Nesse caso, força o pdf.js a rodar no thread principal (mais lento, mas compatível).
+  const loadingOptions = { data: new Uint8Array(buffer) };
+  if(location.protocol === 'file:' || window.__PDFJS_DISABLE_WORKER__) {
+    loadingOptions.disableWorker = true;
+  }
+  const loadingTask = window.pdfjsLib.getDocument(loadingOptions);
   const pdf = await loadingTask.promise;
   let fullText = '';
   for(let p = 1; p <= pdf.numPages; p++) {
@@ -2209,33 +2228,43 @@ function parseExternalPdfPayload(pdfText) {
 
 async function handlePreviousPdfUpload(event) {
   const file = event.target.files && event.target.files[0];
-  if(!file) return;
+  if(!file) { console.warn('[PDF Upload] Nenhum arquivo selecionado.'); return; }
+  console.log('[PDF Upload] Iniciando leitura de:', file.name, '(', file.size, 'bytes )');
   // O nome do arquivo NÃO interfere no processamento — apenas é usado como rótulo de exibição.
   try {
     // Clear previous PDF import to avoid mixing data
     importedPdfState = null;
 
+    console.log('[PDF Upload] Lendo arrayBuffer...');
     const buffer = await file.arrayBuffer();
+    console.log('[PDF Upload] ArrayBuffer OK, tamanho:', buffer.byteLength);
     let payload = null;
     let usedFallback = false;
 
     // 1) Tentativa primária: PDF gerado por esta plataforma (com metadados BRSK embutidos)
     try {
+      console.log('[PDF Upload] Tentando parser BRSK (metadados embutidos)...');
       const pdfText = await extractMetadataTextFromPdf(buffer);
       payload = parseEmbeddedPdfPayload(pdfText);
+      console.log('[PDF Upload] ✅ Parser BRSK OK.');
     } catch (innerErr) {
       // 2) Fallback: PDF externo (qualquer relatório contábil-financeiro com texto extraível)
-      console.warn('[Upload PDF] Metadados BRSK não encontrados, tentando parser de texto:', innerErr.message);
+      console.warn('[PDF Upload] Parser BRSK falhou:', innerErr.message);
+      console.log('[PDF Upload] Tentando parser de texto (pdf.js)...');
+      console.log('[PDF Upload] pdfjsLib disponível:', !!window.pdfjsLib);
       try {
         const visibleText = await extractVisibleTextFromPdf(buffer);
+        console.log('[PDF Upload] Texto extraído, comprimento:', visibleText.length);
         payload = parseExternalPdfPayload(visibleText);
         usedFallback = true;
+        console.log('[PDF Upload] ✅ Parser externo OK. Competência:', payload.latestCompetencia);
       } catch (fallbackErr) {
-        console.error('[Upload PDF] Fallback falhou:', fallbackErr);
+        console.error('[PDF Upload] ❌ Parser externo falhou:', fallbackErr);
         throw fallbackErr;
       }
     }
 
+    console.log('[PDF Upload] Validando contra competência atual...');
     validateImportedAgainstCurrent(payload);
     applyImportedPrefill(payload);
     importedPdfState = {
@@ -2253,7 +2282,7 @@ async function handlePreviousPdfUpload(event) {
       toast('PDF anterior carregado com sucesso. A evolução mensal foi incorporada somente à sessão atual.', 'success');
     }
   } catch (error) {
-    console.error(error);
+    console.error('[PDF Upload] ❌ Erro final:', error);
     importedPdfState = null;
     summarizeImportedState();
     renderHistoryTable();
@@ -3603,6 +3632,30 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     }
   });
+
+  // ── Upload PDF anterior: listeners robustos ──
+  const pdfInput = document.getElementById('pdf-anterior');
+  const pdfZone = document.getElementById('pdf-upload-zone');
+  if(pdfInput && pdfZone) {
+    // Clicar na zona abre o seletor de arquivos
+    pdfZone.addEventListener('click', function(e) {
+      // Evita loop: se o clique veio do próprio input, não dispara de novo
+      if(e.target === pdfInput) return;
+      pdfInput.click();
+    });
+    // Ao mudar o input (selecionar arquivo), chama o handler
+    pdfInput.addEventListener('change', function(e) {
+      console.log('[PDF Upload] Arquivo selecionado:', e.target.files && e.target.files[0] ? e.target.files[0].name : 'nenhum');
+      handlePreviousPdfUpload(e);
+    });
+    // Evitar propagação do click do input para a div
+    pdfInput.addEventListener('click', function(e) {
+      e.stopPropagation();
+    });
+    console.log('[PDF Upload] ✅ Listeners registrados com sucesso.');
+  } else {
+    console.error('[PDF Upload] ❌ Elementos #pdf-anterior ou #pdf-upload-zone não encontrados!');
+  }
 });
 </script>
 
