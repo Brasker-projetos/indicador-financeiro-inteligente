@@ -3183,14 +3183,14 @@ async function generatePDF() {
     const renderedPages = [];
     for (let i = 0; i < pages.length; i++) {
       const pageCanvas = await html2canvas(pages[i], {
-        scale: 3,
+        scale: 2,
         useCORS: true,
         allowTaint: true,
         width: 794,
         backgroundColor: '#ffffff',
         imageTimeout: 15000
       });
-      const imgData = pageCanvas.toDataURL('image/png');
+      const imgData = pageCanvas.toDataURL('image/jpeg', 0.92);
       const imageHeight = (pageCanvas.height / pageCanvas.width) * 794;
       renderedPages.push({ imgData, imageHeight });
       console.log('📄 Page', i+1, 'rendered, height:', Math.round(imageHeight));
@@ -3198,7 +3198,7 @@ async function generatePDF() {
 
     // Create PDF with first page sized to its actual content
     const firstPageHeight = Math.max(renderedPages[0]?.imageHeight || 1123, 1123);
-    const pdf = new jsPDF({ orientation:'portrait', unit:'px', format:[794, firstPageHeight], compress:false });
+    const pdf = new jsPDF({ orientation:'portrait', unit:'px', format:[794, firstPageHeight], compress:true });
     addEmbeddedMetadata(pdf, buildPdfPayload(data, allData));
 
     // Add all pages
@@ -3206,7 +3206,7 @@ async function generatePDF() {
       const { imgData, imageHeight } = renderedPages[i];
       const pageH = Math.max(imageHeight, 1123);
       if(i > 0) pdf.addPage([794, pageH]);
-      pdf.addImage(imgData, 'PNG', 0, 0, 794, imageHeight);
+      pdf.addImage(imgData, 'JPEG', 0, 0, 794, imageHeight);
     }
 
     const [compY, compM] = data.competencia.split('-');
