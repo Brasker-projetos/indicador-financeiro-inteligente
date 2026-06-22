@@ -76,14 +76,11 @@
     });
   }
 
-  // ─── CONTROLE DE ACESSO (e-mail/senha) ───
-  // Só estes e-mails (cadastrados em Authentication > E-mail/senha) acessam.
-  const ALLOWED_EMAILS = [
-    'tecnologia@brasker.com.br',
-    'elton.santos@brasker.com.br',
-    'joao.victor@brasker.com.br',
-    'raiana.lovo@brasker.com.br'
-  ];
+  // ─── CONTROLE DE ACESSO ───
+  // Acesso = ter uma conta neste projeto Firebase (Authentication > E-mail/senha).
+  // Liberar alguém: criar a conta no Console. Remover: excluir a conta (revoga na hora).
+  // IMPORTANTE: manter SÓ o provedor "E-mail/senha" ativo (NÃO ativar Google/Anônimo),
+  // senão "qualquer autenticado" deixaria de ser "apenas quem você autorizou".
   function _ifAuthError(msg) { const el = document.getElementById('authError'); if (el) el.textContent = msg || ''; }
 
   document.addEventListener('DOMContentLoaded', () => {
@@ -115,13 +112,11 @@
     const pwChangeBtn = document.getElementById('pwChangeBtn');
 
     firebase.auth().onAuthStateChanged(user => {
-      const email = (user && user.email || '').toLowerCase();
-      if (user && ALLOWED_EMAILS.includes(email)) {
+      if (user) {
         if (gate) gate.style.display = 'none';
         if (pwChangeBtn) pwChangeBtn.style.display = 'block';
         _ifLoadAndReady();
       } else {
-        if (user) { _ifAuthError('Esta conta não tem permissão de acesso.'); firebase.auth().signOut(); }
         if (gate) gate.style.display = 'flex';
         if (pwChangeBtn) pwChangeBtn.style.display = 'none';
       }
