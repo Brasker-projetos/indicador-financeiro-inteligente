@@ -33,6 +33,7 @@
 <!-- Firebase Realtime Database SDK -->
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-database-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
 <script>
   const firebaseConfig = {
     apiKey:            "AIzaSyCxWY66lj8BiA42iN1xdToYoTy8yVYDl4I",
@@ -60,15 +61,107 @@
       .catch(e => { console.error("[Firebase] ❌ Erro ao carregar:", e.message); return null; });
   };
 
-  // Carrega ao iniciar
-  window._fbLoadResponsaveis().then(lista => {
-    if (Array.isArray(lista) && lista.length) {
-      window._fbResponsaveisIniciais = lista;
-      console.log("[Firebase] ✅ Carregados:", lista);
-    } else {
-      console.log("[Firebase] ℹ️ Banco vazio, usando lista padrão.");
-    }
-    document.dispatchEvent(new Event("firebase-ready"));
+  // Carrega os responsáveis do Firebase — só após login autorizado.
+  function _ifLoadAndReady() {
+    if (window.__ifStarted) return;
+    window.__ifStarted = true;
+    window._fbLoadResponsaveis().then(lista => {
+      if (Array.isArray(lista) && lista.length) {
+        window._fbResponsaveisIniciais = lista;
+        console.log("[Firebase] ✅ Carregados:", lista);
+      } else {
+        console.log("[Firebase] ℹ️ Banco vazio, usando lista padrão.");
+      }
+      document.dispatchEvent(new Event("firebase-ready"));
+    });
+  }
+
+  // ─── CONTROLE DE ACESSO (e-mail/senha) ───
+  // Só estes e-mails (cadastrados em Authentication > E-mail/senha) acessam.
+  const ALLOWED_EMAILS = [
+    'tecnologia@brasker.com.br',
+    'elton.santos@brasker.com.br',
+    'joao.victor@brasker.com.br',
+    'raiana.lovo@brasker.com.br'
+  ];
+  function _ifAuthError(msg) { const el = document.getElementById('authError'); if (el) el.textContent = msg || ''; }
+
+  document.addEventListener('DOMContentLoaded', () => {
+    const gate = document.getElementById('authGate');
+    const form = document.getElementById('authForm');
+
+    if (form) form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      _ifAuthError('');
+      const btn = document.getElementById('authBtn');
+      if (btn) { btn.disabled = true; btn.textContent = 'Entrando...'; }
+      try {
+        const email = document.getElementById('authEmail').value.trim().toLowerCase();
+        const pass = document.getElementById('authPass').value;
+        await firebase.auth().signInWithEmailAndPassword(email, pass);
+      } catch (err) {
+        const code = (err && err.code) || '';
+        let msg = 'E-mail ou senha inválidos.';
+        if (code === 'auth/operation-not-allowed') msg = 'Provedor E-mail/senha não está ativado no Console.';
+        else if (code === 'auth/network-request-failed') msg = 'Falha de rede.';
+        else if (code.indexOf('api-key') !== -1) msg = 'API key do Firebase inválida.';
+        else if (['auth/user-not-found','auth/invalid-credential','auth/wrong-password','auth/invalid-login-credentials'].includes(code)) msg = 'Conta inexistente ou senha incorreta.';
+        _ifAuthError(msg + (code ? '  [' + code + ']' : ''));
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = 'Entrar'; }
+      }
+    });
+
+    const pwChangeBtn = document.getElementById('pwChangeBtn');
+
+    firebase.auth().onAuthStateChanged(user => {
+      const email = (user && user.email || '').toLowerCase();
+      if (user && ALLOWED_EMAILS.includes(email)) {
+        if (gate) gate.style.display = 'none';
+        if (pwChangeBtn) pwChangeBtn.style.display = 'block';
+        _ifLoadAndReady();
+      } else {
+        if (user) { _ifAuthError('Esta conta não tem permissão de acesso.'); firebase.auth().signOut(); }
+        if (gate) gate.style.display = 'flex';
+        if (pwChangeBtn) pwChangeBtn.style.display = 'none';
+      }
+    });
+
+    // Trocar a própria senha (reautentica com a senha atual e atualiza).
+    const pwForm = document.getElementById('pwForm');
+    if (pwForm) pwForm.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const msg = document.getElementById('pwMsg');
+      msg.style.color = '#ff6b6b'; msg.textContent = '';
+      const cur = document.getElementById('pwCurrent').value;
+      const n1 = document.getElementById('pwNew').value;
+      const n2 = document.getElementById('pwNew2').value;
+      if (n1.length < 6) { msg.textContent = 'A nova senha precisa ter ao menos 6 caracteres.'; return; }
+      if (n1 !== n2) { msg.textContent = 'As senhas novas não coincidem.'; return; }
+      const btn = document.getElementById('pwBtn');
+      btn.disabled = true; btn.textContent = 'Salvando...';
+      try {
+        const user = firebase.auth().currentUser;
+        const cred = firebase.auth.EmailAuthProvider.credential(user.email, cur);
+        await user.reauthenticateWithCredential(cred);
+        await user.updatePassword(n1);
+        msg.style.color = '#46d39a'; msg.textContent = 'Senha alterada com sucesso!';
+        pwForm.reset();
+        setTimeout(() => { document.getElementById('pwModal').style.display = 'none'; msg.textContent = ''; }, 1500);
+      } catch (err) {
+        const code = (err && err.code) || '';
+        let m = 'Não foi possível alterar a senha.';
+        if (['auth/wrong-password','auth/invalid-credential','auth/invalid-login-credentials'].includes(code)) m = 'Senha atual incorreta.';
+        else if (code === 'auth/weak-password') m = 'Senha muito fraca (mín. 6 caracteres).';
+        else if (code === 'auth/requires-recent-login') m = 'Por segurança, saia e entre de novo antes de trocar a senha.';
+        else if (code) m += '  [' + code + ']';
+        msg.textContent = m;
+      } finally {
+        btn.disabled = false; btn.textContent = 'Salvar';
+      }
+    });
+
+    window.signOutIndicador = () => firebase.auth().signOut().then(() => location.reload());
   });
 </script>
 <script>/* Pako inflate fallback for PDF historical metadata */
@@ -864,6 +957,50 @@ body {
 </style>
 </head>
 <body>
+
+<!-- TELA DE LOGIN (gate de acesso) -->
+<div id="authGate" style="position:fixed;inset:0;z-index:999999;display:flex;align-items:center;justify-content:center;background:#0b0f17;font-family:system-ui,-apple-system,'Segoe UI',sans-serif">
+  <form id="authForm" style="width:340px;max-width:90vw;background:#131a26;border:1px solid #1f2a3a;border-radius:16px;padding:32px 28px;box-shadow:0 20px 60px rgba(0,0,0,.5)">
+    <div style="font-size:13px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:#4DAFFF;margin-bottom:6px">Brasker Contábil</div>
+    <h1 style="font-size:20px;font-weight:800;color:#eaf2ff;margin:0 0 4px">Indicadores Financeiros</h1>
+    <p style="font-size:13px;color:#8a98ad;margin:0 0 22px">Acesso restrito. Entre com seu e-mail e senha.</p>
+    <label style="display:block;font-size:12px;color:#9fb0c7;margin-bottom:6px">E-mail</label>
+    <input id="authEmail" type="email" autocomplete="username" required placeholder="voce@brasker.com.br"
+      style="width:100%;box-sizing:border-box;background:#0b0f17;border:1px solid #28354a;border-radius:10px;padding:11px 12px;color:#eaf2ff;font-size:14px;margin-bottom:14px;outline:none">
+    <label style="display:block;font-size:12px;color:#9fb0c7;margin-bottom:6px">Senha</label>
+    <input id="authPass" type="password" autocomplete="current-password" required placeholder="••••••••"
+      style="width:100%;box-sizing:border-box;background:#0b0f17;border:1px solid #28354a;border-radius:10px;padding:11px 12px;color:#eaf2ff;font-size:14px;margin-bottom:18px;outline:none">
+    <button type="submit" id="authBtn"
+      style="width:100%;background:#2563eb;border:none;border-radius:10px;padding:12px;color:#fff;font-size:14px;font-weight:700;cursor:pointer">Entrar</button>
+    <div id="authError" style="min-height:18px;margin-top:12px;font-size:12.5px;color:#ff6b6b;text-align:center"></div>
+  </form>
+</div>
+
+<!-- Botão flutuante: alterar minha senha (aparece após login) -->
+<button id="pwChangeBtn" type="button" title="Alterar minha senha"
+  onclick="document.getElementById('pwModal').style.display='flex'"
+  style="display:none;position:fixed;bottom:16px;left:16px;z-index:9998;background:#1f2a3a;color:#cfe0f5;border:1px solid #2d3c52;border-radius:999px;padding:8px 14px;font-size:12.5px;font-weight:600;cursor:pointer;font-family:system-ui,-apple-system,'Segoe UI',sans-serif">🔑 Alterar senha</button>
+
+<!-- Modal: alterar senha -->
+<div id="pwModal" style="display:none;position:fixed;inset:0;z-index:999998;align-items:center;justify-content:center;background:rgba(3,6,12,.72);font-family:system-ui,-apple-system,'Segoe UI',sans-serif">
+  <form id="pwForm" style="width:340px;max-width:90vw;background:#131a26;border:1px solid #1f2a3a;border-radius:16px;padding:28px 26px;box-shadow:0 20px 60px rgba(0,0,0,.5)">
+    <h2 style="font-size:18px;font-weight:800;color:#eaf2ff;margin:0 0 4px">Alterar senha</h2>
+    <p style="font-size:12.5px;color:#8a98ad;margin:0 0 18px">Confirme a senha atual e defina uma nova (mín. 6 caracteres).</p>
+    <input id="pwCurrent" type="password" autocomplete="current-password" required placeholder="Senha atual"
+      style="width:100%;box-sizing:border-box;background:#0b0f17;border:1px solid #28354a;border-radius:10px;padding:11px 12px;color:#eaf2ff;font-size:14px;margin-bottom:12px;outline:none">
+    <input id="pwNew" type="password" autocomplete="new-password" required placeholder="Nova senha"
+      style="width:100%;box-sizing:border-box;background:#0b0f17;border:1px solid #28354a;border-radius:10px;padding:11px 12px;color:#eaf2ff;font-size:14px;margin-bottom:12px;outline:none">
+    <input id="pwNew2" type="password" autocomplete="new-password" required placeholder="Repetir nova senha"
+      style="width:100%;box-sizing:border-box;background:#0b0f17;border:1px solid #28354a;border-radius:10px;padding:11px 12px;color:#eaf2ff;font-size:14px;margin-bottom:16px;outline:none">
+    <div style="display:flex;gap:10px">
+      <button type="button" onclick="document.getElementById('pwModal').style.display='none';document.getElementById('pwMsg').textContent=''"
+        style="flex:1;background:transparent;border:1px solid #2d3c52;border-radius:10px;padding:11px;color:#9fb0c7;font-size:14px;font-weight:600;cursor:pointer">Cancelar</button>
+      <button type="submit" id="pwBtn"
+        style="flex:1;background:#2563eb;border:none;border-radius:10px;padding:11px;color:#fff;font-size:14px;font-weight:700;cursor:pointer">Salvar</button>
+    </div>
+    <div id="pwMsg" style="min-height:18px;margin-top:12px;font-size:12.5px;color:#ff6b6b;text-align:center"></div>
+  </form>
+</div>
 
 <!-- LGPD Banner -->
 <div id="lgpd-banner">
