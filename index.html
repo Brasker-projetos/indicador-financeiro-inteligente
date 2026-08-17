@@ -1215,6 +1215,16 @@ body {
             <span class="form-hint">Juros, IOF, tarifas bancárias</span>
           </div>
           <div class="form-group">
+            <label>(+) Receitas Diversas</label>
+            <input type="text" id="receitas-diversas" class="currency" placeholder="R$ 0,00" oninput="maskMoney(this); calcDRE()" />
+            <span class="form-hint">Aluguéis, venda de ativos, recuperação de despesas</span>
+          </div>
+          <div class="form-group">
+            <label>(-) Despesas Diversas</label>
+            <input type="text" id="desp-diversas" class="currency" placeholder="R$ 0,00" oninput="maskMoney(this); calcDRE()" />
+            <span class="form-hint">Multas, doações, perdas não operacionais</span>
+          </div>
+          <div class="form-group">
             <label>(=) Resultado do Período</label>
             <input type="text" id="resultado" class="currency" placeholder="Calculado automaticamente" readonly
                    style="background:#F0F4FA; font-weight:800; font-size:16px"/>
@@ -1528,11 +1538,13 @@ function calcDRE() {
   const custos = parseMoney(document.getElementById('custos').value);
   const rf = parseMoney(document.getElementById('receitas-financeiras').value);
   const df = parseMoney(document.getElementById('desp-financeiras').value);
-  const res = rl - custos + rf - df;
+  const rdiv = parseMoney(document.getElementById('receitas-diversas').value);
+  const ddiv = parseMoney(document.getElementById('desp-diversas').value);
+  const res = rl - custos + rf - df + rdiv - ddiv;
 
   document.getElementById('receita-liquida').value = (rb || ded) ? fmtMoney(rl) : '';
   const resEl = document.getElementById('resultado');
-  resEl.value = (rb || ded || custos || rf || df) ? fmtMoney(res) : '';
+  resEl.value = (rb || ded || custos || rf || df || rdiv || ddiv) ? fmtMoney(res) : '';
   resEl.style.color = res >= 0 ? '#16a34a' : '#dc2626';
 }
 
@@ -1658,6 +1670,8 @@ function normalizeRecord(record, fallbackCompany={}) {
     custos: Number(base.custos || 0),
     receitasFinanceiras: Number(base.receitasFinanceiras || 0),
     despFinanceiras: Number(base.despFinanceiras || 0),
+    receitasDiversas: Number(base.receitasDiversas || 0),
+    despDiversas: Number(base.despDiversas || 0),
     resultado: Number(base.resultado || 0),
     ativoCirculante: Number(base.ativoCirculante || 0),
     passivoCirculante: Number(base.passivoCirculante || 0),
@@ -1795,6 +1809,8 @@ function collectData() {
     custos: parseMoney(document.getElementById('custos').value),
     receitasFinanceiras: parseMoney(document.getElementById('receitas-financeiras').value),
     despFinanceiras: parseMoney(document.getElementById('desp-financeiras').value),
+    receitasDiversas: parseMoney(document.getElementById('receitas-diversas').value),
+    despDiversas: parseMoney(document.getElementById('desp-diversas').value),
     resultado: parseMoney(document.getElementById('resultado').value),
     ativoCirculante: ativo,
     passivoCirculante: passivo,
@@ -2070,7 +2086,8 @@ function detectDREValuesFromText(text) {
   const result = {
     receitaBruta: 0, deducoes: 0, receitaLiquida: 0,
     custos: 0, resultado: 0,
-    receitasFinanceiras: 0, despFinanceiras: 0
+    receitasFinanceiras: 0, despFinanceiras: 0,
+    receitasDiversas: 0, despDiversas: 0
   };
   const lines = text.split('\n');
   function valueInLine(line) {
@@ -2091,7 +2108,15 @@ function detectDREValuesFromText(text) {
     else if(/receita\s+l[ií]quida/.test(lower) && !result.receitaLiquida) {
       const v = valueInLine(line); if(v) result.receitaLiquida = Math.abs(v);
     }
-    else if((/custo/.test(lower) || /despesa/.test(lower)) && !/financ/.test(lower) && !result.custos) {
+    // As "diversas" vêm antes de custos: a regra de custos captura qualquer
+    // linha com "despesa", e engoliria "Despesas Diversas" se viesse primeiro.
+    else if(/receita/.test(lower) && /divers/.test(lower) && !result.receitasDiversas) {
+      const v = valueInLine(line); if(v) result.receitasDiversas = Math.abs(v);
+    }
+    else if(/despesa/.test(lower) && /divers/.test(lower) && !result.despDiversas) {
+      const v = valueInLine(line); if(v) result.despDiversas = Math.abs(v);
+    }
+    else if((/custo/.test(lower) || /despesa/.test(lower)) && !/financ/.test(lower) && !/divers/.test(lower) && !result.custos) {
       const v = valueInLine(line); if(v) result.custos = Math.abs(v);
     }
     else if(/receita/.test(lower) && /financ/.test(lower) && !result.receitasFinanceiras) {
@@ -2108,7 +2133,7 @@ function detectDREValuesFromText(text) {
     result.receitaLiquida = result.receitaBruta - result.deducoes;
   }
   if(!result.resultado && result.receitaLiquida) {
-    result.resultado = result.receitaLiquida - result.custos + result.receitasFinanceiras - result.despFinanceiras;
+    result.resultado = result.receitaLiquida - result.custos + result.receitasFinanceiras - result.despFinanceiras + result.receitasDiversas - result.despDiversas;
   }
   return result;
 }
@@ -2297,6 +2322,8 @@ function buildSeriesFromExternalPdf(currentComp, dre, ilc, historical, company) 
       custos: vals.custos || 0,
       receitasFinanceiras: 0,
       despFinanceiras: 0,
+      receitasDiversas: 0,
+      despDiversas: 0,
       resultado: vals.resultado || 0,
       ativoCirculante: 0,
       passivoCirculante: 0,
@@ -2318,6 +2345,8 @@ function buildSeriesFromExternalPdf(currentComp, dre, ilc, historical, company) 
       custos: dre.custos || existing.custos || 0,
       receitasFinanceiras: dre.receitasFinanceiras || existing.receitasFinanceiras || 0,
       despFinanceiras: dre.despFinanceiras || existing.despFinanceiras || 0,
+      receitasDiversas: dre.receitasDiversas || existing.receitasDiversas || 0,
+      despDiversas: dre.despDiversas || existing.despDiversas || 0,
       resultado: dre.resultado || existing.resultado || 0,
       ativoCirculante: existing.ativoCirculante || 0,
       passivoCirculante: existing.passivoCirculante || 0,
@@ -2446,6 +2475,7 @@ function clearSensitiveSession() {
   const competenciaAtual = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2, '0')}`;
   [
     'razao-social','cnpj','receita-bruta','deducoes','receita-liquida','custos','receitas-financeiras','desp-financeiras',
+    'receitas-diversas','desp-diversas',
     'resultado','ativo-circulante','passivo-circulante','ilc','ativo-total','patrimonio','novo-responsavel',
     'bem-imobilizado','bem-investimentos','bem-dist-lucro','bem-emprestimo-socios',
     'bem-adiant-fornecedores','bem-clientes','bem-caixa','bem-outros-creditos',
@@ -3069,6 +3099,8 @@ async function generatePDF() {
           <tr class="dre-sub"><td>(-) Custos e Despesas</td><td style="color:#EA7000">– ${fmtMoney(data.custos)}</td></tr>
           <tr class="dre-sub"><td>(+) Receitas Financeiras</td><td style="color:#16a34a">${data.receitasFinanceiras ? fmtMoney(data.receitasFinanceiras) : '—'}</td></tr>
           <tr class="dre-sub"><td>(-) Despesas Financeiras</td><td style="color:#EA7000">${data.despFinanceiras ? '– ' + fmtMoney(data.despFinanceiras) : '—'}</td></tr>
+          <tr class="dre-sub"><td>(+) Receitas Diversas</td><td style="color:#16a34a">${data.receitasDiversas ? fmtMoney(data.receitasDiversas) : '—'}</td></tr>
+          <tr class="dre-sub"><td>(-) Despesas Diversas</td><td style="color:#EA7000">${data.despDiversas ? '– ' + fmtMoney(data.despDiversas) : '—'}</td></tr>
           <tr class="dre-total ${data.resultado>=0?'dre-green':'dre-red'}"><td>(=) Resultado do Período</td><td>${fmtMoney(data.resultado)}</td></tr>
         </table>
 
@@ -3549,6 +3581,7 @@ function parseXlsSheetName(name) {
 function extractDataFromSheet(rows) {
   let receitaBruta=0, deducoes=0, receitaLiquida=0, custos=0, resultado=0;
   let receitasFinanceiras=0, despFinanceiras=0;
+  let receitasDiversas=0, despDiversas=0;
   let ativoCirculante=0, passivoCirculante=0, ilc=0, ativoTotal=0, patrimonio=0;
   let caixa=0, banco=0;
   let razaoSocial = '';
@@ -3637,7 +3670,9 @@ function extractDataFromSheet(rows) {
     if((allLower.includes('receita') && allLower.includes('bruta') && !allLower.includes('dedu')) && val) receitaBruta = Math.abs(val);
     else if(allLower.includes('dedu') && (allLower.includes('receita') || allLower.includes('bruta')) && val) deducoes = Math.abs(val);
     else if(allLower.includes('receita') && allLower.includes('liquid') && val) receitaLiquida = Math.abs(val);
-    else if((allLower.includes('custo') || (allLower.includes('despesa') && !allLower.includes('financ'))) && val) custos = Math.abs(val);
+    else if(allLower.includes('receita') && allLower.includes('divers') && val) receitasDiversas = Math.abs(val);
+    else if(allLower.includes('despesa') && allLower.includes('divers') && val) despDiversas = Math.abs(val);
+    else if((allLower.includes('custo') || (allLower.includes('despesa') && !allLower.includes('financ') && !allLower.includes('divers'))) && val) custos = Math.abs(val);
     else if(allLower.includes('receita') && allLower.includes('financ') && val) receitasFinanceiras = Math.abs(val);
     else if(allLower.includes('despesa') && allLower.includes('financ') && val) despFinanceiras = Math.abs(val);
     else if(allLower.includes('resultado') && val) resultado = val;
@@ -3654,12 +3689,13 @@ function extractDataFromSheet(rows) {
   }
 
   if(!receitaLiquida && receitaBruta) receitaLiquida = receitaBruta - deducoes;
-  if(!resultado && receitaLiquida) resultado = receitaLiquida - custos + receitasFinanceiras - despFinanceiras;
+  if(!resultado && receitaLiquida) resultado = receitaLiquida - custos + receitasFinanceiras - despFinanceiras + receitasDiversas - despDiversas;
   // If ILC not found directly, calculate from ativo/passivo
   if(!ilc && passivoCirculante) ilc = ativoCirculante / passivoCirculante;
 
   return { razaoSocial, receitaBruta, deducoes, receitaLiquida, custos, resultado, competenciaDetected,
-    receitasFinanceiras, despFinanceiras, ativoCirculante, passivoCirculante, ilc, ativoTotal, patrimonio };
+    receitasFinanceiras, despFinanceiras, receitasDiversas, despDiversas,
+    ativoCirculante, passivoCirculante, ilc, ativoTotal, patrimonio };
 }
 
 function handleXlsUpload(event) {
